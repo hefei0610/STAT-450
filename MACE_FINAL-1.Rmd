@@ -1,0 +1,903 @@
+---
+output: 
+  pdf_document:
+    toc: false  # Disable automatic TOC, since you'll add it manually after the title page
+    number_sections: true
+    includes:
+      in_header: header.tex
+---
+
+\begin{titlepage}
+\centering
+\vspace*{1cm}
+\Huge
+\textbf{Does Troponin Predict Cardiovascular Issues After Kidney Transplant?}
+
+\LARGE
+STAT 450: Case Studies in Statistics
+
+
+\vspace{1cm}
+\Large
+Aurthor: Edward Wang, Zhengxiang Zhou, Helen He, Florence Wang
+
+\vspace{0.01cm}
+\Large
+Client: Arya Ardehali, Instructor: Keegan Korthauer
+
+
+\vspace{2cm}
+\Large
+Univeristy of British Columbia
+
+\vspace{0.8cm}
+\Large
+Department of Statistics
+
+\vfill
+2024-04-15
+
+\end{titlepage}
+
+```{=latex}
+
+\renewcommand{\thesection}{\roman{section}}
+\renewcommand{\thesubsection}{\roman{section}.\roman{subsection}}
+\renewcommand{\thesubsubsection}{\roman{section}.\roman{subsection}.\roman{subsubsection}}
+
+```
+
+\newpage
+\tableofcontents
+\newpage
+
+```{r setup, include=FALSE}
+# This section loads necessary library to run the code.
+library("dplyr")
+library(leaps)
+library(knitr)
+library(tidyr)
+library(tibble)
+library(ggplot2)
+library(bestglm)
+library(pROC)
+library("readxl")
+library(kableExtra)
+library(ggpubr)
+library(ggcorrplot)
+library(MASS)
+library(lubridate)
+library("scales")
+```
+
+
+\newpage
+
+```{r, echo=FALSE, include=FALSE}
+# Use This cell to handle the dataset:
+baseline <- read.csv("STATS_450_Database_Final_Baseline.csv")
+
+
+# Remove 1. MACE-related Variables except for the response 2. Descriptive Variables
+
+# Remove the variables mentioned previously
+baseline <- subset(baseline, select = -c(Days_to_MACE, 
+                                         MACE_Type_Pre,
+                                         MACE_Type_one_mo,
+                                         one_month_MACE, Perioperative_MACE, 
+                                         Discharge_Summary, 
+                                         Patient_Notes,Reason_for_CKD))
+
+# Refactor strings into factors to avoid refractoring in testing stage:
+string_columns <- sapply(baseline, is.character)
+
+# Reserve Date_of_TX for analysis
+string_columns <- string_columns[string_columns != "Date_of_TX"]
+baseline[string_columns] <- lapply(baseline[string_columns],  as.factor)
+
+# convert date of TX as date variable
+baseline$Date_of_Tx <- dmy(paste0("01 ", baseline$Date_of_Tx))
+
+# Correct Dataset Mistakes:
+# Refactor LVEF as its format is wrong
+baseline$LVEF <- as.numeric(baseline$LVEF)
+# AS, MR, AR, TR are factors:
+baseline$A_S <- factor(baseline$A_S)
+baseline$MR <- factor(baseline$MR)
+baseline$AR <- factor(baseline$AR)
+baseline$TR <- factor(baseline$TR)
+
+# Problems in Prior TX, should have 2 levels but shows 3
+# Problems with ACE_ARBS, should have 2 levels but shows 4
+baseline$Prior_Tx <- gsub(" ", "", baseline$Prior_Tx)
+baseline$ACE_ARBs <- gsub(" ", "", baseline$ACE_ARBs)
+
+Troponin_T_indices <- c(2, 3, 5, 23, 28, 37, 38, 45, 51, 57, 58, 
+                        68, 75, 81, 82, 83, 85, 88, 91, 98, 99, 100, 
+                        102, 103, 104, 106, 111, 116, 117, 119, 120, 
+                        124, 125, 126, 131, 132, 133, 137, 146, 150,
+                        152, 154, 155, 156, 158, 159, 165, 166, 171,
+                        172, 176, 177, 185, 188, 194, 195, 204, 211,
+                        214, 216, 220, 221, 230, 235, 243, 248, 249,
+                        250, 252, 266, 290)
+
+baseline_T <- baseline[baseline$Patient_ID %in% Troponin_T_indices, ]
+baseline_L <- baseline %>%  anti_join(baseline_T)
+```
+
+```{r, graph between different Troponin measure useage and year, echo=FALSE, include=FALSE}
+year_L <- data.frame(as.integer(format(baseline_L$Date_of_Tx, "%Y")))
+
+names(year_L)[1] <- "year"
+
+Troponin_L_count <- year_L %>% 
+  group_by(year) %>% 
+  summarise(count = n())
+
+
+Troponin_L_frequency <- ggplot() + 
+  geom_line(data = Troponin_L_count, aes(x = year, y = count, color = "Troponin L"), size = 0.5) +
+  geom_point(data = Troponin_L_count, aes(x = year, y = count, color = "Troponin L"), size = 1.5)
+
+
+# Count the occurances of T per year
+year_T <- data.frame(as.integer(format(baseline_T$Date_of_Tx, "%Y")))
+names(year_T)[1] <- "year"
+
+Troponin_T_count <- year_T %>% 
+  group_by(year) %>% 
+  summarise(count = n())
+
+Troponin_frequency <- Troponin_L_frequency + 
+  geom_point(data = Troponin_T_count, aes(x = year, y = count, color = "Troponin T"), size = 1.5) +                      
+  geom_line(data = Troponin_T_count, aes(x = year, y = count, color = "Troponin T"), size = 0.5) +
+  labs(x = "Year", y = "Count", title = "Fig 1: Use of Different Troponin Measures per Year") +
+  scale_x_continuous(breaks = pretty_breaks()) +
+  scale_color_manual(values = c("Troponin L" = "blue", "Troponin T" = "red"),
+                     name = "Troponin Type", labels = c("Troponin I", "Troponin T")) +
+  theme_minimal()
+
+Troponin_frequency
+
+
+
+# Remove Date_of_Tx for future analysis
+baseline_T <- subset(baseline_T, select = -c(Date_of_Tx))
+baseline_L <- subset(baseline_L, select = -c(Date_of_Tx))
+```
+
+```{r, missing values across Troponin L and T dataset, echo=FALSE, include =FALSE}
+# This table contains missing values in the training dataset:
+na_counts_df_L <- data.frame(column_name = character(), 
+                           na_count = numeric(), Proportion_to_dataset = numeric(), stringsAsFactors = FALSE)
+
+na_counts_df_T <- data.frame(column_name = character(), 
+                           na_count = numeric(), Proportion_to_dataset = numeric(), stringsAsFactors = FALSE)
+
+# Iterate over each column of the original data frame
+for (col_name in names(baseline_L)) {
+  # Count NA values in the current column
+  na_count_L <- sum(is.na(baseline_L[[col_name]]))
+  na_count_T <- sum(is.na(baseline_T[[col_name]]))
+  
+  Proportion_to_dataset_L <- na_count_L / nrow(baseline_L)
+  Proportion_to_dataset_T <- na_count_T / nrow(baseline_T)
+  # Append the column name and NA count to the data frame
+  na_counts_df_L <- rbind(na_counts_df_L, data.frame(column_name = col_name, na_count = na_count_L, Proportion_to_dataset = Proportion_to_dataset_L))
+  na_counts_df_T <- rbind(na_counts_df_T, data.frame(column_name = col_name, na_count = na_count_T, Proportion_to_dataset = Proportion_to_dataset_T))
+}
+
+```
+
+
+```{r, Values for Table of Chi-square test bteween MACE & other categorical variables, echo=FALSE, include=FALSE}
+# Use the following to store variable names. 
+names_L <- c()
+names_T <- c()
+# Use the following to store test statistics.
+stat_L <- c()
+stat_T <- c()
+# Use the following to store p-value.
+pval_L <- c()
+pval_T <- c()
+
+# Use this to store number of levels
+levels_L <- c()
+levels_T <- c()
+
+# Update val for L and T: should share the same name
+for (col in names(baseline_L)) {
+  if (is.factor(baseline_L[[col]]) == TRUE && col != "one_year_MACE") {
+    
+    levels_L <- c(levels_L, length(unique(baseline_L[[col]])))
+    names_L <- c(names_L, col)
+    
+    levels_T <- c(levels_T, length(unique(baseline_T[[col]])))
+    names_T <- c(names_T, col)
+    
+    if (length(unique(baseline_L[[col]])) > 1) {
+      test_L <- chisq.test(baseline_L[col], baseline_L$one_year_MACE)
+      stat_L <- c(stat_L, test_L$statistic)
+      pval_L <- c(pval_L, test_L$p.value)
+    } else {
+      stat_L <- c(stat_L, NA)
+      pval_L <- c(pval_L, NA)
+    }
+    
+    # Anticoagulants only have one level in baseline_T
+    if (length(unique(baseline_T[[col]])) > 1) {
+      test_T <- chisq.test(baseline_T[col], baseline_T$one_year_MACE)
+      stat_T <- c(stat_T, test_T$statistic)
+      pval_T <- c(pval_T, test_T$p.value)
+    } else {
+      stat_T <- c(stat_T, NA)
+      pval_T <- c(pval_T, NA)
+    }
+    
+    
+  }
+  
+}
+
+```
+
+
+```{r, Correlation Plot between Numeric Variables, fig.width=8, fig.height=6, echo=FALSE}
+
+numeric_data_T <- baseline_T[, sapply(baseline_T, is.numeric)]
+numeric_data_L <- baseline_L[, sapply(baseline_L, is.numeric)]
+
+
+cor_matrix_T <- cor(numeric_data_T, use = "complete.obs", method = "spearman")
+cor_matrix_L <- cor(numeric_data_L, use = "complete.obs", method = "spearman")
+
+fig1 <- ggcorrplot(cor_matrix_T, method = "circle", type = "upper", hc.order = TRUE,
+           lab = TRUE, lab_size = 4, 
+           colors = c("#6D9EC1", "white", "#E46726"), 
+           title = "Fig A1: Correlation Matrix of Numeric Variables (T)")
+
+fig2 <- ggcorrplot(cor_matrix_L, method = "circle", type = "upper", hc.order = TRUE,
+           lab = TRUE, lab_size = 4, 
+           colors = c("#6D9EC1", "white", "#E46726"), 
+           title = "Fig A2: Correlation Matrix of Numeric Variables (I)")
+
+
+```
+
+
+```{r, dataset cleaning & variables removal, echo=FALSE, include=FALSE}
+# Combining categories:
+levels(baseline_L$HCM)[levels(baseline_L$HCM) == "No" | levels(baseline_L$HCM) == "Query"] <- "Not Yes"
+levels(baseline_L$CM)[levels(baseline_L$CM) == "No" | levels(baseline_L$CM) == "Query"] <- "Not Yes"
+levels(baseline_L$CAD)[levels(baseline_L$CAD) == "No" | levels(baseline_L$CAD) == "Query"] <- "Not Yes"
+
+levels(baseline_T$HCM)[levels(baseline_T$HCM) == "No" | levels(baseline_T$HCM) == "Query"] <- "Not Yes"
+levels(baseline_T$CM)[levels(baseline_T$CM) == "No" | levels(baseline_T$CM) == "Query"] <- "Not Yes"
+levels(baseline_T$CAD)[levels(baseline_T$CAD) == "No" | levels(baseline_T$CAD) == "Query"] <- "Not Yes"
+levels(baseline_T$MI)[levels(baseline_T$MI) == "No" | levels(baseline_T$MI) == "Query"] <- "Not Yes"
+levels(baseline_T$Dialysis)[levels(baseline_T$Dialysis) != "Hemodialysis"] <- "Not Hemodialysis"
+
+# Remove variables:
+baseline_T <- subset(baseline_T, select = -c(BNP, Deceased, Anticoagulants, CKD_Category, Patient_ID))
+baseline_L <- subset(baseline_L, select = -c(BNP, Deceased, CKD_Category, Hemoglobin_A1C, Patient_ID))
+```
+
+```{r, echo=FALSE, include=FALSE}
+# Use this cell to set seed and split the dataset
+# 80% training; 10% validation, 10% testing;
+set.seed(450)
+training_L <- baseline_L %>%  slice_sample(prop = 0.8)
+training_T <- baseline_T %>%  slice_sample(prop = 0.8)
+
+testing_and_validation_L <- baseline_L %>%  anti_join(training_L)
+testing_and_validation_T <- baseline_T %>% anti_join(training_T)
+
+testing_L <- testing_and_validation_L %>%  slice_sample(prop = 0.5)
+validation_L <- testing_and_validation_L %>%  anti_join(testing_L)
+
+testing_T <- testing_and_validation_T %>%  slice_sample(prop = 0.5)
+validation_T <- testing_and_validation_T %>%  anti_join(testing_T)
+
+```
+
+```{r, model fitting T, echo=FALSE, include=FALSE}
+
+# Baseline model will be the intercept only model
+base_T <- glm(one_year_MACE ~ 1, data = training_T, family = binomial)
+
+# Best based on selection centred on Troponin using exhaustive method:
+initial_model_T <- glm(one_year_MACE ~ Troponin_Baseline, 
+                     family = binomial, 
+                     data = training_T)
+
+best_Troponin_T <- step(initial_model_T, 
+                       scope=list(lower=~Troponin_Baseline, upper=~.), 
+                       direction="both",  
+                       data=training_T)
+
+best_coeffs <- coef(best_Troponin_T)
+
+print(best_coeffs)
+
+
+
+best_overall_T <- regsubsets(
+  x = one_year_MACE ~., nvmax = ncol(training_T),
+  data = training_T,
+  method = "forward")
+
+MACE_exhaustive_summary<-summary(best_overall_T, exact = TRUE)
+
+MACE_exhaustive_summary
+```
+
+```{r, model fitting L, echo=FALSE, include=FALSE}
+
+# Baseline model will be the intercept only model
+base_L <- glm(one_year_MACE ~ 1, data = training_L, family = binomial)
+
+# Best based on selection centred on Troponin using exhaustive method:
+initial_model_L <- glm(one_year_MACE ~ Troponin_Baseline, 
+                     family = binomial, 
+                     data = training_L)
+
+best_Troponin_L <- step(initial_model_L, 
+                       scope=list(lower=~Troponin_Baseline, upper=~.), 
+                       direction="both",  
+                       data=training_L)
+
+best_coeffs_L <- coef(best_Troponin_L)
+
+print(best_coeffs_L)
+
+
+best_overall_L <- regsubsets(
+  x = one_year_MACE ~., nvmax = ncol(training_L),
+  data = training_L,
+  method = "forward")
+
+MACE_exhaustive_summary_L<-summary(best_overall_L, exact = TRUE)
+
+MACE_exhaustive_summary_L
+```
+
+```{r, the best chosen model not centred on Troponin T, include=FALSE, echo=FALSE}
+# Choose a model (e.g., the 3rd model)
+chosen_model_T <- which.min(MACE_exhaustive_summary$bic)
+model_features_T <- MACE_exhaustive_summary$outmat[chosen_model_T, ]
+
+best_overall_T_model <- glm(one_year_MACE ~ Age + PAD_PVD + CD + A_S + MR + TR, 
+                     family = binomial, 
+                     data = training_T)
+summary(best_overall_T_model)
+```
+
+
+```{r, test set test T, echo=FALSE, include=FALSE}
+
+# Obtain confusion matrix from validation set and compare the result
+pred <- predict(best_overall_T_model, newdata = testing_and_validation_T, type = "response")
+pred_power <- ifelse(pred > 0.5, 1, 0)
+confusion_Matrix3 <- table(Predicted = pred_power, Actual = testing_and_validation_T$one_year_MACE)
+confusion_Matrix3
+
+pred <- predict(best_Troponin_T, newdata = testing_and_validation_T, type = "response")
+pred_power <- ifelse(pred > 0.5, 1, 0)
+confusion_Matrix4 <- table(Predicted = pred_power, Actual = testing_and_validation_T$one_year_MACE)
+confusion_Matrix4
+
+pred <- predict(base_T, newdata = testing_and_validation_T, type = "response")
+pred_power <- ifelse(pred > 0.5, 1, 0)
+confusion_Matrix5 <- table(Predicted = pred_power, Actual = testing_and_validation_T$one_year_MACE)
+confusion_Matrix5
+
+```
+
+```{r, the best chosen model not centred on Troponin L,  include = FALSE, echo=FALSE}
+# Choose a model (e.g., the 3rd model)
+chosen_model_L <- which.min(MACE_exhaustive_summary_L$bic)
+model_features_L <- MACE_exhaustive_summary_L$outmat[chosen_model_L, ]
+
+best_overall_L_model <- glm(one_year_MACE ~ Sex + PAD_PVD + CD + Revas + Smoking + DM + DLD + Statins + Anticoagulants + Dialysis + MR + Tx_Type, 
+                            family = binomial, 
+                            data = training_L)
+summary(best_overall_T_model)
+```
+
+```{r, test set test L, echo=FALSE, include=FALSE}
+
+# Obtain confusion matrix from validation set and compare the result
+pred <- predict(best_overall_L_model, newdata = testing_and_validation_L, type = "response")
+pred_power <- ifelse(pred > 0.5, 1, 0)
+confusion_Matrix6 <- table(Predicted = pred_power, Actual = testing_and_validation_L$one_year_MACE)
+confusion_Matrix6
+
+pred <- predict(best_Troponin_L, newdata = testing_and_validation_L, type = "response")
+pred_power <- ifelse(pred > 0.5, 1, 0)
+confusion_Matrix7 <- table(Predicted = pred_power, Actual = testing_and_validation_L$one_year_MACE)
+confusion_Matrix7
+
+pred <- predict(base_L, newdata = testing_and_validation_L, type = "response")
+pred_power <- ifelse(pred > 0.5, 1, 0)
+confusion_Matrix8 <- table(Predicted = pred_power, Actual = testing_and_validation_L$one_year_MACE)
+confusion_Matrix8
+
+```
+
+
+## Summary {-}
+
+Cardiovascular complications continue to pose significant concerns for patients undergoing kidney transplant surgeries. This study seeks to identify factors associated with post-transplant Major Adverse Cardiac Events (MACE). Specifically, the potential predictive capability of pre-transplant cardiac Troponin levels is investigated through the application of three logistic regression models, which are selected using the Akaike information criterion (AIC) and the Bayesian Information Criterion (BIC). It appears that pre-transplant troponin levels possess limited predictive ability for MACE.  However, the investigation reveals promising indications within other biomarkers, notably Age, past diagnosis of Peripheral artery disease/Peripheral vascular disease (PAD_PVD), severe mitral regurgitation (MR = 3), severe Aortic stenosis (AS = 3)  or Carotid Artery Disease (CD), may influence the occurrence of post-transplant MACE.
+
+# Introduction
+
+In the field of transplant surgery, understanding and mitigating the risk of Major Adverse Cardiac Events (MACE) is paramount for improving patient survival rates. This study arises from the need to explore the predictive value of preoperative cardiac troponin (cTn) levels, a biomarker indicating heart damage, in forecasting MACE during the critical periods following transplant procedures. We focus on the statistical question of whether the Troponin level measured prior to the transplant is a powerful predictor of post-transplant MACE. Using logistic regression and different variable selection methods, this study aims to examine the predictive power of Troponin in relation to MACE as well as look for other variables in the dataset that can identify post-operative MACE. 
+
+# Data
+
+This study uses clinical data gathered from 129 patients diagnosed with chronic kidney disease (CKD) who participated in the St. Paul's Hospital Kidney Transplant program between January 2023 and July 2023.
+
+The dataset, as part of the program's record-keeping, has detailed patient information, including demographic details such as sex and age, medical history, pre-transplant blood test results, and detailed documentation of Major Adverse Cardiac Events (MACE) occurring up to one-year post-transplantation.
+
+In total, the dataset comprises 46 variables, categorized into 34 categorical variables, 8 numeric variables, and 4 descriptive variables. As all descriptive variables capture details tell a patient's medical summary, numeric variables hold important results of the blood test, and categorical variables about a patient's disease history.
+
+## About Troponin
+
+Troponin, whether measured in Troponin I (ug/L) or Troponin T (ug/L), serves as the primary explanatory variable of interest in various blood tests administered to individual patients. Typically, Troponin I and T are not convertible and used for different purposes: in practice, Troponin I is primarily used for diagnosing composite cardiovascular disease and coronary heart disease, whereas for Troponin T, which also helps detect heart issues, is more strongly associated with risk of non–cardiovascular disease death (Welsh, 2019). Importantly, the consistent uses of both Troponin I and T across years imply the random assignment of patients to any of two measurements such that characteristics of other shared variables in either group should infer those of the population.
+
+```{r, Troponin Frequency Graph, fig.width=8, fig.height=6, echo=FALSE}
+
+Troponin_frequency
+
+```
+
+
+When using Spearman correlation to capture highly correlated numeric variables for each group of Troponin (I or T), no significant correlation (> 0.5) has been spotted in any pair. In relation to Troponin versus the primary response variable MACE, Troponin T exhibits comparable distributions across two levels of MACE (see Fig A3). However, though still largely overlapping, Troponin I demonstrates a variation in distribution shape which can be a result of sampling variation due to the smaller sample size (36, refer to Fig A4).
+
+
+## About MACE
+
+One_year_MACE, an indicator variable capturing if the patient contracts MACE within one year after the kidney transplant, is the main response variable of interest.  Specifically, MACE refers to a collection of heart events including “nonfatal stroke, nonfatal myocardial infarction, and cardiovascular death.” The information about MACE is collected both prior to and post-transplant. Post-transplant MACE contains details such as how many days after transplant a patient contracted MACE and what type of MACE they have contracted with. Notably, MACE data is reasonably unbalanced as more than 86% of patients remain healthy after the transplant.
+
+Based on the results of the chi-square tests conducted on the Troponin T dataset, variables grading of mitral regurgitation severity (MR), grading of Tricuspid regurgitation severity (TR), grading of Aortic stenosis severity (AS), and Deceased exhibit strong dependencies with MACE (Univariate chi-square test p.adjust < 0.05) (refer to Table 17 in Appendix B). This suggests that these variables are potentially strong predictors of MACE occurrence. However, in the case of the Troponin I dataset, no similar pattern is observed across all variables (refer to Table 16 in Appendix B). This lack of significant findings could be attributed to the smaller sample size (35 complete observations), which makes it more challenging for significant test results to emerge. Therefore, in the Troponin I dataset, the relationship between the variables and MACE may not be as evident or statistically significant due to the limitations imposed by a smaller sample.
+
+
+## About Missing Value
+
+In both the Troponin I and Troponin T groups, Brain Natriuretic Peptide (BNP) is the main cause for missing values. In Troponin I, these missing values account for approximately 39% of the overall data, while in Troponin T group, they make up about 14% (refer to table 14 and 15 in Appendix B). Furthermore, notably in the Troponin I group, Hemoglobin A1C contributes to approximately 14% of missing data, but none in the Troponin T group (refer to table 14 and 15 in Appendix B). Finally, as a result of low correlation between BNP, Hemoglobin A1C, and any other numeric variables, no imputation method is appropriate here to deal with missing data (refer to Fig A1 and Fig A2) 
+
+
+# Methods
+
+The data are split randomly between training (80%) and test (20%) such that the training set is used to fit and select models and the test set is used to report the results in terms of the best model selected. Splitting the data can help avoid double-dipping and use unbiased data to evaluate. As Troponin T and I are measured differently, for each group (T or I), we analyze the relationship between Troponin and MACE independently using 3 logistic regression models to better capture MACE as a binary response variable and avoid making strong assumptions on the dataset. Finally, in terms of 3 models to be fitted, we choose to the baseline to be the intercept-only model, the best Troponin model as the model selected using forward selection starting from just Troponin I or T plus the intercept, and the best overall model to be selected using forward selection from just the intercept. In creating these 3 different models, we aim to evaluate the predictive power of Troponin through model comparisons and test result analysis. 
+
+## Dataset Cleaning
+
+Before fitting the model, some variables are removed due to various reasons. 
+
+For both Troponin T and Troponin I, 
+
+- `BNP` is removed as it contains more than 15% missing value in both datasets. As discussed previously that the missing BNP cannot be imputed correctly, these missing values can cause severe data loss that affect negatively on model fitting. 
+
+- Since `Deceased` is a binary variable measuring whether the patient has passed away and MACE, the response variable, is a primary cause of death, we remove the `Deceased` variable as `Deceased` doesn’t help predict MACE but represents a possible outcome of it. 
+
+- `CKD Category` is removed as it repeats similar information such as Diabetes and blood hypertension that are specifically captured by other variables like DM (the binary variable for Diabetes) and HTN (the binary variable for blood hypertension) . Besides, CKD category has more than five levels among 130 observations (72 observations in Troponin T, 58 in Troponin I). This may weaken the fitted model's performance. 
+
+Different approaches are employed to clean Troponin T and Troponin I datasets. 
+
+For Troponin T,
+
+- `Anticoagulant` is removed since it only has one level in Troponin T. Model fitting can only be applied to the categorical variable that contains 2 or more levels.
+
+For Troponin I,
+
+- `Hemoglobin A1C` is removed as it contains more than 10% missing value in Troponin I and can not be imputed effectively using other numeric variables as mentioned previously. 
+
+
+## Model Fitting
+
+After cleaning the datasets, three models are fitted for both Troponin T and Troponin I. The specific details are provided below, 
+
+- `Baseline`: an Intercept-only model mostly for comparison to other 2 models in terms of prediction accuracy and AUC. No model sharing the same confusion matrix or worse prediction accuracy can be considered as a strong/effective model. 
+
+- `Best Troponin`: a model is obtained by the forward selection that uses the model only including Troponin and intercept as the starting point. This is the model fitted to explore prediction power of Troponin (I or T) to MACE while using forward selection to greedily choose any other variables that can help improve the model’s performance adjusting for model size. The selection criteria used is Akaike information criterion (AIC). 
+
+- `Best Overall`: This model is obtained by the forward selection that uses only the intercept as the baseline. The purpose of this model is to select the best overall model without restrictions on Troponin. If the best overall model ended up with worse performance than the baseline or the best Troponin model, it might suggest that the dataset is too small or biased such that adding more variables to the best overall model leads to overfitting and reduced performance. The selection criteria used is Bayesian Information Criteria (BIC).
+
+Due to software and package constraints, the best overall and the best Troponin model are using different selection criteria. While employing different criteria may raise concerns in the final models, we argue that AIC and BIC are not so different as both are deviance-based selection criteria adjusted by model size (BIC generally penalizes bigger models more than AIC), which makes the resulting models comparable. 
+
+After the model selection, we compare all three models in terms of confusion matrix, prediction accuracy, and AUC plot. More specifically, as the dataset is composed mostly of negative cases (MACE = ‘No’), a strong, working model should be able to capture some positive cases when they are present. 
+
+
+```{r, BIC Plot for Troponin I, fig.width=6, fig.height=4, echo=FALSE}
+
+# Plot for exhaustive search BIC
+plot(MACE_exhaustive_summary_L$bic,
+     main = "Fig 2: BIC change of Selecting Best Overall I Model",
+     xlab = "Number of Input Variables", ylab = "BIC", type = "b", pch = 15,
+     col = "red"
+)
+
+```
+
+```{r, BIC Plot for Troponin T, fig.width=6, fig.height=4, echo=FALSE}
+
+# Plot for exhaustive search BIC
+plot(MACE_exhaustive_summary$bic,
+     main = "Fig 3: BIC change of Selecting Best Overall T Model",
+     xlab = "Number of Input Variables", ylab = "BIC", type = "b", pch = 15,
+     col = "red"
+)
+```
+
+
+# Result
+
+## Result for Troponin T analysis
+
+Using forward selection, the best Troponin model fails to introduce any extra variable which keeps the model the same as the default starting point (only Troponin T and the intercept).The inability to enhance the model by adding new variables suggests a poor starting point, as the greedy forward selection method fails improve performance when adjusting for model size (because AIC penalizes bigger models), indicating that Troponin may not be an effective predictor. This is further supported by the data from the tables below, where the Troponin T coefficient not significant (< 0.05), its effect size nearly zero, and the best Troponin model’s confusion matrix and AUC value (0.58) are similar to those of the baseline model, collectively suggesting that Troponin T is likely not a strong predictor of MACE.
+
+Regarding the best overall model, while still none of the coefficients are statistically significant (< 0.05 this might because that the training set is small making it very hard to reject the null at 0.95), the model achieves a higher AUC value (0.727) and better prediction accuracy compared to the baseline model. Crucially, the presence of a true positive case in the confusion matrix indicates that the model is effectively identifying relevant cases. Notably, according to the final best overall model and confusion matrix below, higher age and past-history of heart disease such as moderate to severe Aortic Stenosis (AS), Mitral Regurgitation (MR), tricuspid regurgitation (TR), and diagnosis of Carotid Artery Disease (CD) appear to have positive effects on MACE prediction. Interestingly, a history of peripheral artery disease (PAD_PVD) negatively impacts the prediction of MACE by a factor of -36.1168. However, this effect has a p-value very close to 1 and can very well be an arbitrary result of model fitting.
+
+Overall, according to the result of confusion matrices and ROC graphs,  it seems that troponin isn't a strong predictor of MACE. Instead, variables describing age and heart-related disease seem to have more potential in predicting MACE.
+
+```{r,  echo=FALSE}
+kable(confusion_Matrix3, caption = "Confusion Matrix of Best Overall T Model Against Test Set")
+kable(confusion_Matrix4, caption = "Confusion Matrix of Best Troponin T Model Against Test Set")
+kable(confusion_Matrix5, caption = "Confusion Matrix of Baseline T Model Against Test Set")
+```
+
+
+```{r, include=FALSE, echo=FALSE}
+#Coefficient table for the Best Overall model for Troponin T
+
+model_variables_T_overall <- data.frame(
+  'Variables(Best Overall T)' = c(
+    'Age (Years)',
+    'Peripheral artery disease (Y/N)',
+    'Carotid Artery Disease (Y/N)',
+    'Aortic stenosis (1, 2, 3)',
+    'mitral regurgitation (1, 2, 3)',
+    'Tricuspid regurgitation (1, 2, 3)'
+  ),
+  'Coefficients' = c(
+    '0.3137',
+    'Y: -36.1168',
+    '40.1538',
+    '1: 2.1821, 3: 22.0940',
+    '1: 0.4318, 2: 57.7015',
+    '1: 0.5538, 2: 19.1337'
+  ),
+  stringsAsFactors = FALSE
+)
+
+```
+
+```{r,  echo=FALSE}
+kable(model_variables_T_overall, caption = "Coefficient table for the Best Overall model for Troponin T")
+```
+
+
+```{r, include=FALSE, echo=FALSE}
+
+#Coefficient table for the Best Troponin model for Troponin T
+
+model_variables_T <- data.frame(
+  'Variables(Best Troponin T)' = c(
+    'Troponin_Baseline'),
+  
+  'Coefficients' = c(
+    '-0.003964'
+  ),
+  stringsAsFactors = FALSE
+)
+
+```
+
+```{r,  echo=FALSE}
+kable(model_variables_T, caption = "Coefficient table for the Best Troponin model for Troponin T")
+```
+
+```{r, AUC, echo=FALSE, include=FALSE}
+## Sketch the ROC & AUC curve for analysis
+predicted_MACE_overall <- predict(best_overall_T_model, newdata = testing_and_validation_T, type = "response")
+
+ROC_overall <- roc(
+  response = testing_and_validation_T$one_year_MACE,
+  predictor = predicted_MACE_overall
+)
+
+plot(ROC_overall,
+      print.auc = FALSE, col = "red", lwd = 3, lty = 2,
+       main = "Plot 2: ROC curve"
+)
+
+
+## Sketch the ROC & AUC curve for analysis
+predicted_MACE_Troponin <- predict(best_Troponin_T, newdata = testing_and_validation_T, type = "response")
+
+ROC_Troponin <- roc(
+  response = testing_and_validation_T$one_year_MACE,
+  predictor = predicted_MACE_Troponin
+)
+
+plot(ROC_Troponin,
+      print.auc = FALSE, col = "red", lwd = 3, lty = 2,
+       main = "Plot 2: ROC curve"
+)
+
+
+## Sketch the ROC & AUC curve for analysis
+predicted_MACE_base <- predict(base_T, newdata = testing_and_validation_T, type = "response")
+
+ROC_base <- roc(
+  response = testing_and_validation_T$one_year_MACE,
+  predictor = predicted_MACE_base
+)
+
+plot(ROC_base,
+      print.auc = FALSE, col = "red", lwd = 3, lty = 2,
+       main = "Plot 2: ROC curve"
+)
+```
+
+
+```{r, include=FALSE}
+
+# combine the above 3 ROC curves in one plot
+
+plot(ROC_overall,
+     col = "red",
+     lwd = 3, 
+     lty = 1, 
+     main = "Fig 2: Comparison of ROC Curves from different models",
+     xlab = "Specificity",
+     ylab = "Sensitivity")
+
+lines(ROC_Troponin,
+      col = "blue",
+      lwd = 3,
+      lty = 2)
+
+lines(ROC_base,
+      col = "black",
+      lwd = 3,
+      lty = 3)
+
+legend("bottomright", 
+       legend = c("Best Overall Model", "Best Troponin Model", "Baseline Model"),
+       col = c("red", "blue", "black"),
+       lty = 2,
+       lwd = 3)
+
+AUC_overall <- auc(ROC_overall)
+AUC_Troponin <- auc(ROC_Troponin)
+AUC_base <- auc(ROC_base)
+
+text(0.8, 0.8, paste("AUC Overall:", round(AUC_overall, 3)), col = "red")
+text(0.09, 0.55, paste("AUC Troponin:", round(AUC_Troponin, 3)), col = "blue")
+text(0.4, 0.4, paste("AUC Baseline:", round(AUC_base, 3)), col = "black")
+
+```
+
+
+## Result for Troponin I analysis
+
+The confusion matrices of all three Troponin I models shows that the best overall in fact has the worst performance among 3. This result is not all unexpected as the Troponin I dataset is much smaller than the T which leads to the best overall model for Troponin I overfit on the training data when trying to include more variables. Furthermore, recall the results of the chi-square tests, all variables significant in the Troponin T dataset are not found significant in the I dataset while it's known that both datasets are depicting the same population. This also adds to the conclusion that the Troponin I dataset is not working as those variables found significant in Troponin T have widely-known effects in causing MACE (especially death) following transplants (such as TR and MR) according to the client's knowledge. 
+
+Given the aforementioned context, it was determined that further steps such as the generation of confusion matrices and Receiver Operating Characteristic (ROC) curves for the model(s) would not yield meaningful insights due to the model’s inherent statistical limitations.
+Therefore, these analytical steps were not pursued. The critical insight from this analysis underscores the necessity for a larger dataset. An increase in the number of observations is important in achieving conclusive evidence regarding the model’s effectiveness
+or to facilitate the derivation of an optimally predictive model. This enhancement in data volume would potentially enable a more robust statistical evaluation and validation of the predictive capabilities concerning Troponin I.
+
+```{r,  echo=FALSE}
+kable(confusion_Matrix5, caption = "Confusion Matrix of Best Overall I Model Against Test Set")
+kable(confusion_Matrix6, caption = "Confusion Matrix of Best Troponin I Model Against Test Set")
+kable(confusion_Matrix7, caption = "Confusion Matrix of Baseline I Model Against Test Set")
+```
+
+
+```{r, include=FALSE, echo=FALSE}
+
+#Coefficient table for the Best Overall model for Troponin I
+model_variables_I_overall <- data.frame(
+  'Variables(Best Overall I)' = c(
+    'Sex (M/F)',
+    'PAD_PVD (Y/N)',
+    'CD (Y/N)',
+    'Revas (Y/N)',
+    'Smoking (Y/N)',
+    'DMYeS (Y/N)',
+    'DLD (Y/N)',
+    'Statins (Y/N)',
+    'Anticoagulants (Y/N)',
+    'Dialysis (Y, N, P)',
+    'MR (1, 2, 3)',
+    'Tx_Type (Y/N)'),
+  'Coefficients' = c(
+    'M: 0.1181',
+    'Y: -0.287',
+    'Y: 0.7194',
+    'Y: -0.457',
+    'Y: 0.344',
+    'Y: 0.6152',
+    'Y: 0.5101',
+    'Y: 0.7963',
+    'Y: 0.3962',
+    'N: -0.2791, P: 0.1502',
+    '1: 0.4361, 2: -0.1492',
+    'Y: -0.2053, N: -0.2477'),
+  stringsAsFactors = FALSE
+)
+    
+
+```
+
+```{r,  echo=FALSE}
+kable(model_variables_I_overall, caption = "Coefficient table for the Best Overall model for Troponin I")
+```
+
+```{r,include=FALSE, echo=FALSE}
+
+#Coefficient table for the Best Troponin model for Troponin I
+
+model_variables_I <- data.frame(
+  'Variables(Best Troponin I)' = c(
+    'Troponin_Baseline'),
+  
+  'Coefficients' = c(
+    '0.0174'
+  ),
+  stringsAsFactors = FALSE
+)
+
+```
+
+```{r,  echo=FALSE}
+kable(model_variables_I, caption = "Coefficient table for the Best Troponin model for Troponin I")
+```
+
+# Conclusion
+
+The analysis of the Troponin T dataset indicates that Troponin T isn’t a reliable predictor of Major Cardiac Adverse Events (MACE). This finding aligns with the understanding that Troponin T may not directly detect cardiovascular events such as stroke or heart attack, which are components of MACE.
+
+Variables representing age or past heart disease such as TR ( tricuspid regurgitation) and CD (Carotid Artery Disease), chosen by the forward selection model, appear to has a strong association to MACE. 
+
+It’s noteworthy that none of the blood test variables were selected in the forward selection model. This suggests that predicting MACE solely based on blood test results might not be feasible.
+
+Due to having a relatively small dataset and an unrepresentative Troponin I group, the findings listed above may not apply to all CKD patients around the world. Also, as the response variable, MACE, is recorded through a one-year period after the transplant, it’s also questionable to use variables measured before the transplant to predict MACE while the CKD patients are known vulnerable to other possible diseases due to reduced immunity which can very well be more direct causes to postoperative MACE. Combining this concern of post-operative confounders, we suggest that the future research should more blood tests prior to and post transplant in order to get more knowledge of the patients as well as introducing more observations to Troponin I group in order find the effect of Troponin I. Finally, a more reliable research can also include more variables capturing patient’s health after the transplant reducing possible post-transplant confounder effect. 
+
+\newpage
+
+# Reference
+
+- Welsh, P., Preiss, D., Hayward, C., Shah, A. S. V., McAllister, D., Briggs, A., Boachie, C., McConnachie, A., Padmanabhan, S., Welsh, C., Woodward, M., Campbell, A., Porteous, D., Mills, N. L., & Sattar, N. (2019). Cardiac troponin T and troponin I in the general population: Comparing and contrasting their genetic determinants and associations with outcomes. Circulation, 139(24), 2754–2764. https://doi.org/10.1161/CIRCULATIONAHA.118.038529
+
+
+\newpage
+
+# Appendix
+
+## Appendix A: Graphs
+
+```{r, Correlation Actual Plot between Numeric Variables, fig.width=8, fig.height=6, echo=FALSE}
+
+fig1
+
+```
+
+```{r, Correlation Actual1 Plot between Numeric Variables, fig.width=8, fig.height=6, echo=FALSE}
+
+fig2
+
+```
+
+```{r, Troponin Boxplot, fig.width=6, fig.height=4, echo=FALSE}
+
+ggplot(baseline_T, aes(x = one_year_MACE, y = Troponin_Baseline, fill = one_year_MACE)) +
+  geom_violin(trim = FALSE) +
+  scale_fill_manual(values = c("Yes" = "skyblue", "No" = "lightgreen")) +
+  labs(title = "Fig A3: Violin Plot of Troponin T vs MACE", y = "ug/L", x = "") +
+  theme_minimal()
+
+ggplot(baseline_L, aes(x = one_year_MACE, y = Troponin_Baseline, fill = one_year_MACE)) +
+  geom_violin(trim = FALSE) +
+  scale_fill_manual(values = c("Yes" = "skyblue", "No" = "lightgreen")) +
+  labs(title = "Fig A4: Violin Plot of Troponin L vs MACE", y = "ug/L", x = "") +
+  theme_minimal()
+
+```
+
+
+## Appendix B: Tables
+
+Table: Variable Type
+
+| Type:                           | Variables                                 |
+|---------------------------------------|-------------------------------------------|
+| Numeric                           | 'Patient ID', 'Non-HDI', 'BNP', 'Creatinine', 'Hemoglobin', 'Hemoglobin A1C', 'Age', 'Baseline Troponin', 'LVEF', 'Days to MACE'|
+|                                       |                                           |
+| Categorical                          | 'Sex', 'CAD', 'MI', 'Revas', 'CHF', 'PAD/PVD', 'COPD', 'CM', 'HCM','Stroke/T1A', 'CD', 'Smoking', 'HTN', 'DM', 'AF', 'DLD', 'Aspirin', 'Statins', 'B-Blockers', 'Anticoagulants','Insulin', 'ACE/ARBs','Dialysis', 'AS', 'MR', 'AR', 'TR', 'Prior Tx', 'Tx Type', 'Deceased', 'Perioperative MACE', '1 Month MACE', '1 Year MACE', 'MACE Type', 'CKD Category', 'MACE_Type_Pre'   |
+|                                       |                                           |
+| Descriptive | 'Reason for CKD', 'Discharge Summary', 'Patient Notes'|
+|                                       |                                           |
+| Date | 'Date of Tx'|
+
+
+Table: Variable Categorization
+
+| Categories:                           | Variables                                 |
+|---------------------------------------|-------------------------------------------|
+| Basic Info                            | 'Patient ID', 'Age', 'Sex', 'Deceased'    |
+|                                       |                                           |
+| Blood data                            | 'Non-HDL', 'BNP', 'Creatinine', 'Hemoglobin', 'Hemoglobin A1C', 'Troponins', 'LVEF', 'AS', 'MR', 'AR', 'TR', 'Baseline Troponin'|
+|                                       |                                           |
+| Prior disease and noteworthy traits  | 'MI', 'Revas', 'CHF', 'PAD/PVD', 'CM', 'HCM', 'Stroke/T1A', 'CD', 'Smoking', 'HTN', 'DM' , 'AF', 'DLD', 'Aspirin', 'Statins', 'B-Blockers', 'Anticoagulants', 'Insulin', 'ACE/ARBs', 'Dialysis', 'COPD'|
+|                                       |                                           |
+| Info about transplant                | 'Reason for CKD', 'CKD Category', 'Prior Tx', 'Date of Tx', 'Tx Type'|
+|                                       |                                           |
+| MACE related                         | 'Perioperative MACE', '1 Month MACE', '1 Year MACE', 'Days to MACE', 'MACE Type', 'MACE_Type_Pre'|
+|                                       |                                           |
+| Patient Notes                        | 'Discharge Summary', 'Patient Notes'|
+
+
+```{r, Summary Statistics Table, echo=FALSE}
+
+
+summary_table = data.frame(Variables = 
+                             c("Non HDL", "BNP", "Creatinine", "Hemoglobin", 
+                               "Hemoglobin A1C", "Troponin (Baseline)", "Age", 
+                               "LVEF", "Days to MACE"),
+                           Min = 
+                             c(0.77, 18, 231, 79, 4, 0.04, 31, 0.31, 1),
+                           Median = 
+                             c(2.71, 714, 678, 110, 6.3, 41, 62, 0.6, 74),
+                           Mean = 
+                             c(2.865, 6110.4, 704.7, 110.9, 6.492, 56.62, 60.27,
+                               0.5863, 109), 
+                           Max = 
+                             c(7.21, 64671.0, 1473.0, 152, 11.1, 281, 78, 0.75, 365), 
+                           SD = 
+                             c(1.239, 11734.05, 261.147, 14.219, 1.277, 42.841, 
+                               10.008, 0.0783, 115),
+                           Missing = c(3, 33, 0, 0, 11, 0, 0, 21, 112)
+                           
+                           )
+
+# Create table
+kable(summary_table, caption = "Summary Statistics for Numeric Variables")
+
+```
+
+
+```{r, Missing Values in Troponin L, echo=FALSE, warning = FALSE, message = FALSE}
+
+kable(na_counts_df_L, caption = "Missing Values in Troponin I")
+
+```
+
+```{r, Missing Values in Troponin T, echo=FALSE, warning = FALSE, message = FALSE}
+
+kable(na_counts_df_T, caption = "Missing Values in Troponin T")
+```
+
+```{r, Table of Chi-square test bteween MACE & other categorical variables L, echo=FALSE}
+
+test_table_L = data.frame(Variables = names_L,
+                           Statistics = stat_L,
+                           P_value = pval_L, 
+                          levels = levels_L)
+
+# Display the table:
+kable(test_table_L, caption = "Results from Chi-Square Test (I)")
+
+```
+
+```{r, Table of Chi-square test bteween MACE & other categorical variables T, echo=FALSE}
+test_table_T = data.frame(Variables = names_T,
+                           Statistics = stat_T,
+                           P_value = pval_T, 
+                          levels = levels_T)
+
+# Display the table:
+kable(test_table_T, caption = "Results from Chi-Square Test (T)")
+```
